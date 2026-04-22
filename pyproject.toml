@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib --cov=src --cov=run_pipeline --cov-report=term-missing:skip-covered --cov-fail-under=80"
+
+[tool.coverage.run]
+branch = true
+omit = [
+    "*/src/app/streamlit_app.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
