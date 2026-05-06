@@ -96,10 +96,17 @@ def compute_metrics(
     w_arr /= w_arr.sum()
     valid = dict(zip(valid.keys(), w_arr.tolist()))
 
-    port_ret: pd.Series = pd.Series(
-        portfolio_returns_usd(returns_usd[list(valid)], valid),
-        index=returns_usd.index,
+    # build clean sub-DataFrame and keep its own index (length may differ from returns_usd
+    # because portfolio_returns_usd drops all-NaN rows internally)
+    sub = (
+        returns_usd[list(valid)]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(how="all")
+        .fillna(0.0)
     )
+    sub_w = np.array([valid[t] for t in sub.columns], dtype=float)
+    sub_w /= sub_w.sum()
+    port_ret: pd.Series = pd.Series(sub.values @ sub_w, index=sub.index)
 
     ann_return = float(port_ret.mean() * 252)
     ann_vol    = float(port_ret.std()  * np.sqrt(252))
