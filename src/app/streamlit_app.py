@@ -569,6 +569,238 @@ def page_backtest(
 
 
 
+def page_comparison(returns_usd: pd.DataFrame, data: dict) -> None:
+    st.header("📐 Сравнение портфелей")
+
+    from src.analysis.portfolio_comparison import (
+        compare_all, rolling_performance, PORTFOLIO_VARIANTS,
+    )
+    from src.risk.var import portfolio_returns_usd
+
+    spy_ret: pd.Series | None = None
+    imoex_ret: pd.Series | None = None
+
+    prices = data["prices"]
+    if not prices.empty:
+        all_rets = compute_returns(prices)
+        if "SPY" in all_rets.columns:
+            spy_ret = all_rets["SPY"].dropna()
+        if "IMOEX" in all_rets.columns:
+            imoex_ret = all_rets["IMOEX"].dropna()
+
+    n_sim = st.selectbox("Симуляции MC (чем больше — точнее, но медленнее)", [500, 1000, 2000], index=1, key="cmp_nsim")
+
+    with st.spinner("Считаю метрики для всех портфелей и бенчмарков..."):
+        df = compare_all(returns_usd, spy_ret=spy_ret, imoex_ret=imoex_ret, n_sim=int(n_sim))
+
+    st.subheader("Сводная таблица метрик")
+    st.dataframe(df.set_index("Портфель"), use_container_width=True)
+
+    st.divider()
+    st.subheader("Годовая доходность vs. Волатильность")
+    try:
+        plot_df = df[df["Ann. Return"] != "—"].copy()
+        plot_df["_return"] = plot_df["Ann. Return"].str.rstrip("%").astype(float) / 100
+        plot_df["_vol"]    = plot_df["Ann. Vol"].str.rstrip("%").astype(float) / 100
+        plot_df["_sharpe"] = pd.to_numeric(plot_df["Sharpe"], errors="coerce")
+        fig_rv = px.scatter(
+            plot_df,
+            x="_vol", y="_return",
+            text="Портфель",
+            color="_sharpe",
+            color_continuous_scale="RdYlGn",
+            labels={"_vol": "Годовая волатильность", "_return": "Годовая доходность", "_sharpe": "Sharpe"},
+            title="Risk-Return",
+        )
+        fig_rv.update_traces(textposition="top center", marker_size=12)
+        fig_rv.update_xaxes(tickformat=".1%")
+        fig_rv.update_yaxes(tickformat=".1%")
+        st.plotly_chart(fig_rv, use_container_width=True)
+    except Exception:
+        pass
+
+    st.divider()
+    st.subheader("VaR 95% 1d по портфелям")
+    try:
+        bar_df = df.copy()
+        bar_df["_var95"] = pd.to_numeric(
+            bar_df["VaR 95% 1d"].str.rstrip("%"), errors="coerce"
+        ) / 100
+        bench_labels = {"SPY", "IMOEX (RUB)"}
+        bar_df["тип"] = bar_df["Портфель"].apply(lambda p: "Бенчмарк" if p in bench_labels else "Портфель")
+        fig_bar = px.bar(
+            bar_df.dropna(subset=["_var95"]),
+            x="Портфель", y="_var95", color="тип",
+            color_discrete_map={"Портфель": "#74c7ec", "Бенчмарк": "#f38ba8"},
+            labels={"_var95": "VaR 95% 1d"},
+            title="VaR 95% 1d (MC Student-t)",
+        )
+        fig_bar.update_yaxes(tickformat=".2%")
+        st.plotly_chart(fig_bar, use_container_width=True)
+    except Exception:
+        pass
+
+    st.divider()
+    st.subheader("Скользящие метрики (90 дней)")
+    selected = st.selectbox("Портфель для скользящего графика", list(PORTFOLIO_VARIANTS.keys()), key="cmp_roll")
+    try:
+        roll = rolling_performance(PORTFOLIO_VARIANTS[selected], returns_usd, window=90)
+        fig_roll = go.Figure()
+        fig_roll.add_trace(go.Scatter(x=roll.index, y=roll["sharpe"],   name="Sharpe (rolling 90d)", line=dict(color="#a6e3a1")))
+        fig_roll.add_trace(go.Scatter(x=roll.index, y=roll["var_ewma"], name="EWMA VaR 95%",          line=dict(color="#f38ba8"), yaxis="y2"))
+        fig_roll.update_layout(
+            yaxis2=dict(overlaying="y", side="right", tickformat=".2%", showgrid=False),
+            legend=dict(orientation="h"),
+            title=f"Скользящий Sharpe и VaR — {selected}",
+        )
+        st.plotly_chart(fig_roll, use_container_width=True)
+    except Exception as exc:
+        st.info(f"Не удалось построить скользящий график: {exc}")
+
+
+def page_optimisation(returns_usd: pd.DataFrame, weights: dict[str, float], conf: float) -> None:
+    st.header("⚡ Оптимизация гиперпараметров")
+
+    from src.analysis.hyperopt import (
+        optimize_lambda, optimize_weights, optimize_capm_window,
+    )
+    from src.risk.var import portfolio_returns_usd
+
+    tabs = st.tabs(["λ EWMA", "Веса портфеля", "Окно CAPM"])
+
+    # ── Tab 1: Lambda ──
+    with tabs[0]:
+        st.subheader("Оптимальный λ для EWMA-волатильности")
+        st.markdown(
+            "Expanding-window бэктест: для каждого λ ∈ [0.88, 0.99] считаем долю exceedances "
+            "и выбираем λ, при котором она наиболее близка к (1 − conf)."
+        )
+        run_lam = st.button("▶ Запустить оптимизацию λ", key="run_lam")
+        if run_lam:
+            port_ret_arr = portfolio_returns_usd(returns_usd, weights)
+            with st.spinner("Оптимизирую λ..."):
+                res = optimize_lambda(port_ret_arr, conf=conf)
+            st.success(f"Оптимальный λ = **{res.best_lambda:.2f}** (exceedance rate: {res.best_actual_rate:.3f}, цель: {res.target_rate:.3f})")
+            fig_lam = px.line(
+                res.grid, x="lambda", y=["actual_rate", "target_rate"],
+                labels={"value": "Доля exceedances", "variable": ""},
+                title=f"Exceedance rate vs λ (conf={conf:.0%})",
+                color_discrete_sequence=["#89b4fa", "#f38ba8"],
+            )
+            fig_lam.add_vline(x=res.best_lambda, line_dash="dot", annotation_text="best λ")
+            st.plotly_chart(fig_lam, use_container_width=True)
+            st.dataframe(res.grid.style.highlight_min(subset=["error"], color="#a6e3a150"), use_container_width=True)
+
+    # ── Tab 2: Portfolio weights ──
+    with tabs[1]:
+        st.subheader("Оптимальные веса портфеля")
+        st.markdown("Оптимизация по выбранному критерию при ограничениях: сумма весов = 1, каждый вес ∈ [min_w, max_w].")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            objective = st.selectbox(
+                "Критерий",
+                ["sharpe", "min_var", "min_vol", "min_es", "calmar"],
+                format_func=lambda x: {
+                    "sharpe":  "Макс. Sharpe",
+                    "min_var": "Мин. VaR 95%",
+                    "min_vol": "Мин. волатильность",
+                    "min_es":  "Мин. ES (CVaR)",
+                    "calmar":  "Макс. Calmar",
+                }[x],
+                key="opt_obj",
+            )
+        with col2:
+            min_w = st.slider("Мин. вес актива", 0.01, 0.15, 0.02, 0.01, key="opt_minw")
+        with col3:
+            max_w = st.slider("Макс. вес актива", 0.20, 0.80, 0.60, 0.05, key="opt_maxw")
+
+        run_w = st.button("▶ Запустить оптимизацию весов", key="run_weights")
+        if run_w:
+            with st.spinner(f"Оптимизирую веса ({objective})..."):
+                try:
+                    res_w = optimize_weights(returns_usd, objective=objective, conf=conf, min_w=min_w, max_w=max_w)
+                except Exception as exc:
+                    st.error(str(exc))
+                    st.stop()
+
+            status = "✅ сошлась" if res_w.converged else "⚠️ не сошлась"
+            metric_label = {
+                "sharpe": "Sharpe", "min_var": "VaR 95% 1d",
+                "min_vol": "Ann. Vol", "min_es": "ES 95% 1d", "calmar": "Calmar",
+            }[objective]
+            st.success(f"Оптимизация {status}. {metric_label} = **{res_w.metric_value:.4f}**")
+
+            w_df = pd.DataFrame(
+                {"Тикер": list(res_w.optimal_weights), "Вес": list(res_w.optimal_weights.values())}
+            )
+            w_df["Текущий вес"] = w_df["Тикер"].map(weights).fillna(0.0)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig_pie = px.pie(
+                    w_df, names="Тикер", values="Вес",
+                    title=f"Оптимальные веса ({objective})",
+                    hole=0.4,
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            with col_b:
+                fig_cur = px.pie(
+                    w_df, names="Тикер", values="Текущий вес",
+                    title="Текущие веса (сайдбар)",
+                    hole=0.4,
+                )
+                st.plotly_chart(fig_cur, use_container_width=True)
+
+            w_df["Изменение"] = (w_df["Вес"] - w_df["Текущий вес"]).map(lambda x: f"{x:+.1%}")
+            w_df["Вес"]          = w_df["Вес"].map(lambda x: f"{x:.2%}")
+            w_df["Текущий вес"]  = w_df["Текущий вес"].map(lambda x: f"{x:.2%}")
+            st.dataframe(w_df.set_index("Тикер"), use_container_width=True)
+
+    # ── Tab 3: CAPM window ──
+    with tabs[2]:
+        st.subheader("Оптимальное окно rolling CAPM")
+        st.markdown("Поиск окна (в торговых днях), при котором средний R² rolling OLS наибольший.")
+
+        spy_col = st.selectbox("Бенчмарк для CAPM", ["SPY (глобальный)", "IMOEX (российский)"], key="opt_capm_bench")
+        asset_col = st.selectbox("Актив", [c for c in returns_usd.columns], key="opt_capm_asset")
+
+        bench_ret_series: pd.Series | None = None
+        try:
+            with get_db() as conn:
+                bench_ticker = "SPY" if "SPY" in spy_col else "IMOEX"
+                bench_prices = load_close_pivot([bench_ticker], DATE_START, str(pd.Timestamp.today().date()), conn)
+            if not bench_prices.empty and bench_ticker in bench_prices.columns:
+                bench_ret_series = np.log(bench_prices[bench_ticker] / bench_prices[bench_ticker].shift(1)).dropna()
+        except Exception:
+            pass
+
+        run_cw = st.button("▶ Запустить оптимизацию окна", key="run_capm_w")
+        if run_cw:
+            if bench_ret_series is None:
+                st.warning("Данные по бенчмарку не найдены. Сначала загрузите данные.")
+            elif asset_col not in returns_usd.columns:
+                st.warning(f"Актив {asset_col} не найден в returns_usd.")
+            else:
+                with st.spinner("Оптимизирую окно CAPM..."):
+                    try:
+                        res_cw = optimize_capm_window(returns_usd[asset_col], bench_ret_series)
+                    except Exception as exc:
+                        st.error(str(exc))
+                        st.stop()
+                st.success(f"Оптимальное окно: **{res_cw.best_window} дней** (avg R² = {res_cw.best_avg_r2:.3f})")
+                fig_cw = px.bar(
+                    res_cw.grid.dropna(subset=["avg_r2"]),
+                    x="window", y="avg_r2",
+                    labels={"window": "Окно (дней)", "avg_r2": "Среднее R²"},
+                    title="Среднее R² rolling OLS vs. Окно",
+                    color="avg_r2",
+                    color_continuous_scale="Blues",
+                )
+                fig_cw.add_vline(x=res_cw.best_window, line_dash="dot", annotation_text="best")
+                st.plotly_chart(fig_cw, use_container_width=True)
+                st.dataframe(res_cw.grid, use_container_width=True, hide_index=True)
+
+
 def page_about() -> None:
     st.header("ℹ️ Методология RiskPulse")
     st.markdown(
@@ -610,12 +842,24 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Раздел",
-        ["📊 Портфель & Риск", "📈 Факторный анализ", "🌩 Стресс-тесты", "🔬 Бэктест", "ℹ️ О системе"],
+        [
+            "📊 Портфель & Риск",
+            "📐 Сравнение портфелей",
+            "⚡ Оптимизация",
+            "📈 Факторный анализ",
+            "🌩 Стресс-тесты",
+            "🔬 Бэктест",
+            "ℹ️ О системе",
+        ],
         index=0,
     )
 
     if page == "📊 Портфель & Риск":
         page_portfolio_risk(returns_usd, weights, conf, var_limit, n_sim)
+    elif page == "📐 Сравнение портфелей":
+        page_comparison(returns_usd, data)
+    elif page == "⚡ Оптимизация":
+        page_optimisation(returns_usd, weights, conf)
     elif page == "📈 Факторный анализ":
         page_factor_analysis(prices, returns_usd, data)
     elif page == "🌩 Стресс-тесты":
