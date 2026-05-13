@@ -66,7 +66,7 @@ Student-t ν (MLE) = **9.16** → умеренные толстые хвосты
 
 Basel √10 scaling: **5.14%** vs overlapping **7.19%** → расхождение **2.04%** (нарушение i.i.d. в стресс)
 
-### Kupiec + Christoffersen (COVID-2020, T=317)
+### Kupiec + Christoffersen (rolling по режимам; тестовая выборка >= ~1 торгового года)
 
 | Метод        | Exceedances | p_uc   | Reject_uc | p_ind  | Reject_ind | p_cc   |
 |--------------|-------------|--------|-----------|--------|------------|--------|
@@ -76,6 +76,10 @@ Basel √10 scaling: **5.14%** vs overlapping **7.19%** → расхождени
 | MC Student-t | 24 (7.57%)  | **0.0501** | ✓ **нет** | 0.3450 | ✓ нет  | **0.0940** |
 
 **Вывод**: MC Student-t — единственная модель, прошедшая оба теста при α=5%.
+
+Примечание по валидации: в `src/backtest/runner.py` бэктест теперь использует явное
+разделение train/test по периодам и режимно-зависимые гиперпараметры
+(`lambda_ewma`, `n_sim`) для `normal` и `crisis`.
 
 ### Risk Attribution (Component VaR, 95%)
 

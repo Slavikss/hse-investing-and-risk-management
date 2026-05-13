@@ -502,12 +502,14 @@ def page_backtest(
 
     st.info(
         "Expanding window: VaR по истории до даты t, P&L в t+1. "
-        "Период COVID_2020; санкции 2022 в этом бэктесте не используются (пропуск торгов MOEX)."
+        "Для каждого режима (normal/crisis) используются разные гиперпараметры EWMA."
     )
+
+    from src.backtest.runner import BACKTEST_PERIODS
 
     period = st.selectbox(
         "Период бэктеста",
-        ["COVID_2020", "RateHike_2022"],
+        list(BACKTEST_PERIODS.keys()),
         key="bt_period",
     )
     methods_sel = st.multiselect(
@@ -529,6 +531,10 @@ def page_backtest(
         except Exception as e:
             st.error(f"Ошибка бэктеста: {e}")
             return
+    st.caption(
+        f"Режим: {bt.regime} | train: {bt.start_train}→{bt.start_test} | "
+        f"test: {bt.start_test}→{bt.end_test} | λ_EWMA={bt.ewma_lambda:.2f} | n_sim={bt.n_sim}"
+    )
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(

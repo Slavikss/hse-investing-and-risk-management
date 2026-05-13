@@ -194,6 +194,7 @@ def mc_normal_var(
     horizon:         int   = 1,
     n_sim:           int   = N_SIM,
     seed:            int   = 42,
+    lam:             float = LAMBDA_EWMA,
 ) -> tuple[float, float]:
     """MC VaR/ES, многомерная нормаль, ковариация EWMA."""
     tickers = [t for t in weights if t in asset_returns.columns]
@@ -201,7 +202,7 @@ def mc_normal_var(
     w = w / w.sum()
 
     rets = asset_returns[tickers].replace([np.inf, -np.inf], np.nan).dropna(how="all").fillna(0)
-    cov  = ewma_cov_matrix(rets)
+    cov  = ewma_cov_matrix(rets, lam=lam)
 
     rng = np.random.default_rng(seed)
     L   = np.linalg.cholesky(cov + np.eye(len(w)) * 1e-10)
@@ -220,6 +221,7 @@ def mc_student_t_var(
     horizon:        int   = 1,
     n_sim:          int   = N_SIM,
     seed:           int   = 42,
+    lam:            float = LAMBDA_EWMA,
 ) -> tuple[float, float, float]:
     """MC VaR/ES, многомерный t; ν — MLE по истории портфеля. Возврат: (var, es, nu)."""
     tickers = [t for t in weights if t in asset_returns.columns]
@@ -230,7 +232,7 @@ def mc_student_t_var(
     port_hist = rets.values @ w
 
     nu  = fit_student_t_nu(port_hist)
-    cov = ewma_cov_matrix(rets)
+    cov = ewma_cov_matrix(rets, lam=lam)
 
     rng = np.random.default_rng(seed)
     L   = np.linalg.cholesky(cov + np.eye(len(w)) * 1e-10)
@@ -255,6 +257,7 @@ def compute_all_var(
     conf:              float = CONF_DEFAULT,
     horizon:           int   = 1,
     n_sim:             int   = N_SIM,
+    lam:               float = LAMBDA_EWMA,
 ) -> VaRResult:
     """Сводка VaR/ES по четырём методам для заданного горизонта."""
     tickers = [t for t in weights if t in asset_returns_usd.columns]
@@ -269,15 +272,15 @@ def compute_all_var(
 
     result.hist_var, result.hist_es = historical_var(port_returns, conf, horizon)
 
-    result.param_var, result.param_es = parametric_var(port_returns, conf, horizon)
+    result.param_var, result.param_es = parametric_var(port_returns, conf, horizon, lam=lam)
 
     if horizon == 10:
         result.sqrt10_param_var = parametric_var_sqrt10(port_returns, conf)
 
-    result.mc_norm_var, result.mc_norm_es = mc_normal_var(rets, w_dict, conf, horizon, n_sim)
+    result.mc_norm_var, result.mc_norm_es = mc_normal_var(rets, w_dict, conf, horizon, n_sim, lam=lam)
 
     result.mc_t_var, result.mc_t_es, result.nu_t = mc_student_t_var(
-        rets, w_dict, conf, horizon, n_sim
+        rets, w_dict, conf, horizon, n_sim, lam=lam
     )
 
     return result
@@ -289,6 +292,8 @@ def compute_var_timeseries(
     conf:              float = CONF_DEFAULT,
     method:            Literal["historical", "parametric", "mc_normal", "mc_t"] = "historical",
     window:            int   = 252,
+    n_sim:             int   = N_SIM,
+    lam:               float = LAMBDA_EWMA,
 ) -> pd.Series:
     """Expanding-window VaR по датам (для бэктеста)."""
     tickers = [t for t in weights if t in asset_returns_usd.columns]
@@ -311,11 +316,11 @@ def compute_var_timeseries(
         if method == "historical":
             v, _ = historical_var(hist, conf, 1)
         elif method == "parametric":
-            v, _ = parametric_var(hist, conf, 1)
+            v, _ = parametric_var(hist, conf, 1, lam=lam)
         elif method == "mc_normal":
-            v, _ = mc_normal_var(rets.iloc[:i], w_dict, conf, 1)
+            v, _ = mc_normal_var(rets.iloc[:i], w_dict, conf, 1, n_sim=n_sim, lam=lam)
         else:
-            v, _, _ = mc_student_t_var(rets.iloc[:i], w_dict, conf, 1)
+            v, _, _ = mc_student_t_var(rets.iloc[:i], w_dict, conf, 1, n_sim=n_sim, lam=lam)
         var_series[dates[i]] = v
 
     return pd.Series(var_series, name=f"var_{method}_{int(conf*100)}")
